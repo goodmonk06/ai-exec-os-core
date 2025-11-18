@@ -1,4 +1,4 @@
-// Prisma schema for AI Exec OS Core
+// Prisma schema for AI Exec OS Core - Phase 3 Enhanced
 
 generator client {
   provider = "prisma-client-js"
@@ -9,47 +9,162 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model Agent {
+// ============================================================================
+// CORE ENTITIES
+// ============================================================================
+
+model Organization {
   id          String   @id @default(cuid())
   name        String
+  slug        String   @unique
   description String?
-  model       String   // e.g., "gpt-4", "claude-3"
-  tools       Json     // Available tools for this agent
-  config      Json     // Agent-specific configuration
+  settings    Json     @default("{}")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  users             User[]
+  agents            Agent[]
+  workflows         Workflow[]
+  workflowTemplates WorkflowTemplate[]
+  schedules         Schedule[]
+  webhooks          Webhook[]
+
+  @@index([slug])
+}
+
+model User {
+  id             String   @id @default(cuid())
+  organizationId String
+  email          String   @unique
+  name           String
+  role           UserRole @default(member)
+  metadata       Json     @default("{}")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdJobs  Job[]        @relation("JobCreator")
+
+  @@index([organizationId])
+  @@index([email])
+}
+
+enum UserRole {
+  owner
+  admin
+  member
+  viewer
+}
+
+model Agent {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  description    String?
+  model          String // e.g., "gpt-4", "claude-3"
+  provider       String   @default("openai") // openai, anthropic, custom
+  tools          Json // Available tools for this agent
+  config         Json // Agent-specific configuration
+  capabilities   Json     @default("[]") // List of AgentCapability tags
+  isActive       Boolean  @default(true)
+  metadata       Json     @default("{}")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
   @@index([name])
+  @@index([provider])
 }
 
 model Workflow {
-  id          String   @id @default(cuid())
-  name        String
-  description String?
-  definition  Json     // Workflow definition (steps, agents, etc.)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  description    String?
+  definition     Json // Workflow definition (steps, agents, etc.)
+  version        Int      @default(1)
+  isActive       Boolean  @default(true)
+  metadata       Json     @default("{}")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
-  jobs        Job[]
+  organization      Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  jobs              Job[]
+  versions          WorkflowVersion[]
+  schedules         Schedule[]
+  executionContexts ExecutionContext[]
 
+  @@index([organizationId])
   @@index([name])
+  @@index([isActive])
+}
+
+model WorkflowVersion {
+  id          String   @id @default(cuid())
+  workflowId  String
+  version     Int
+  definition  Json
+  changelog   String?
+  createdBy   String? // User ID
+  isActive    Boolean  @default(false)
+  metadata    Json     @default("{}")
+  createdAt   DateTime @default(now())
+
+  workflow Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@unique([workflowId, version])
+  @@index([workflowId])
+  @@index([version])
+}
+
+model WorkflowTemplate {
+  id             String   @id @default(cuid())
+  organizationId String?
+  name           String
+  description    String?
+  category       String   @default("general")
+  definition     Json
+  isPublic       Boolean  @default(false)
+  usageCount     Int      @default(0)
+  rating         Float    @default(0)
+  metadata       Json     @default("{}")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([category])
+  @@index([isPublic])
 }
 
 model Job {
-  id         String    @id @default(cuid())
-  workflowId String
-  status     JobStatus @default(pending)
-  input      Json      // Input parameters for the job
-  output     Json?     // Job execution result
-  error      Json?     // Error details if failed
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
+  id          String    @id @default(cuid())
+  workflowId  String
+  createdBy   String?
+  status      JobStatus @default(pending)
+  priority    Int       @default(0)
+  input       Json // Input parameters for the job
+  output      Json? // Job execution result
+  error       Json? // Error details if failed
+  executionId String? // Reference to ExecutionContext
+  startedAt   DateTime?
+  completedAt DateTime?
+  metadata    Json      @default("{}")
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
-  workflow   Workflow  @relation(fields: [workflowId], references: [id], onDelete: Cascade)
-  logs       JobLog[]
+  workflow Workflow          @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  creator  User?             @relation("JobCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+  logs     JobLog[]
+  context  ExecutionContext?
 
   @@index([workflowId])
   @@index([status])
+  @@index([createdBy])
+  @@index([priority])
   @@index([createdAt])
 }
 
@@ -58,6 +173,8 @@ enum JobStatus {
   running
   succeeded
   failed
+  cancelled
+  retrying
 }
 
 model JobLog {
@@ -65,12 +182,15 @@ model JobLog {
   jobId     String
   level     LogLevel
   message   String
-  meta      Json?    // Additional metadata
+  meta      Json? // Additional metadata
+  traceId   String? // For distributed tracing
   createdAt DateTime @default(now())
 
-  job       Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  job Job @relation(fields: [jobId], references: [id], onDelete: Cascade)
 
   @@index([jobId])
+  @@index([level])
+  @@index([traceId])
   @@index([createdAt])
 }
 
@@ -79,4 +199,123 @@ enum LogLevel {
   warn
   error
   debug
+}
+
+model ExecutionContext {
+  id          String   @id @default(cuid())
+  jobId       String   @unique
+  workflowId  String
+  variables   Json     @default("{}") // Runtime variables
+  state       Json     @default("{}") // Execution state
+  currentStep String?
+  metadata    Json     @default("{}")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  job      Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  workflow Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@index([workflowId])
+  @@index([currentStep])
+}
+
+// ============================================================================
+// SCHEDULING & AUTOMATION
+// ============================================================================
+
+model Schedule {
+  id             String         @id @default(cuid())
+  organizationId String
+  workflowId     String
+  name           String
+  cronExpression String
+  timezone       String         @default("UTC")
+  input          Json           @default("{}") // Default input for scheduled runs
+  isActive       Boolean        @default(true)
+  lastRunAt      DateTime?
+  nextRunAt      DateTime?
+  metadata       Json           @default("{}")
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workflow     Workflow     @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([workflowId])
+  @@index([isActive])
+  @@index([nextRunAt])
+}
+
+// ============================================================================
+// INTEGRATIONS & EXTENSIONS
+// ============================================================================
+
+model Webhook {
+  id             String        @id @default(cuid())
+  organizationId String
+  name           String
+  url            String
+  events         String[] // List of event types to subscribe to
+  secret         String? // For signature verification
+  headers        Json          @default("{}")
+  isActive       Boolean       @default(true)
+  lastTriggeredAt DateTime?
+  metadata       Json          @default("{}")
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([isActive])
+}
+
+// ============================================================================
+// TAGGING & ORGANIZATION
+// ============================================================================
+
+model Tag {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  color     String   @default("#3B82F6")
+  category  String   @default("general")
+  metadata  Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  relations TagRelation[]
+
+  @@index([name])
+  @@index([category])
+}
+
+model TagRelation {
+  id         String   @id @default(cuid())
+  tagId      String
+  entityType String // "agent", "workflow", "template", etc.
+  entityId   String
+  createdAt  DateTime @default(now())
+
+  tag Tag @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@unique([tagId, entityType, entityId])
+  @@index([tagId])
+  @@index([entityType, entityId])
+}
+
+// ============================================================================
+// METRICS & MONITORING (Future: can be replaced with external systems)
+// ============================================================================
+
+model Metric {
+  id        String   @id @default(cuid())
+  name      String
+  type      String // counter, gauge, histogram
+  value     Float
+  labels    Json     @default("{}")
+  timestamp DateTime @default(now())
+
+  @@index([name])
+  @@index([timestamp])
 }
